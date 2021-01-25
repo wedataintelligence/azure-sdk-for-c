@@ -1,70 +1,37 @@
 . (Join-Path $PSScriptRoot common.ps1)
 
-$SECTION_REGEX = "^\[(?<SectionName>\w+)\.(?<Command>\w+)\]:\s#\s\((?<Comment>.*)\)"
+$PATTERN_REGEX = "^\[\w+(\.(?<SectionName>\w+))?\]:\s#\s\((?<Pattern>.*)\)"
+$CsvMetaData = Get-CSVMetadata
 
-function Parse-GeneralReleaseNotesFile ($releaseNotesLocation) 
+function Get-PackagesInfoFromFile ($releaseNotesLocation) 
 {
     $releaseNotesContent = Get-Content -Path $releaseNotesLocation
-    $lineNumber = 0
-    $releaseHighlights = @()
-    $addLines = $false
+    $checkLine = $False
+    $presentPkgInfo = @()
 
-    while ($lineNumber -lt $ReleaseNotesContent.Count)
+    foreach ($line in $releaseNotesContent)
     {
-        $line = $ReleaseNotesContent[$lineNumber]
-        if (($line -match $SECTION_REGEX) -and ($matches["SectionName"] -eq "releasehighlights"))
+        if ($line -eq "<!--")
         {
-            if ($matches["Command"] -eq "start")
-            {
-                $addLines = $true
-            }
-            if ($matches["Command"] -eq "end")
-            {
-                $addLines = $false
-                break
-            }
-        }
-        if ($addLines)
-        {
-            $releaseHighlights += $line
-        }
-        $lineNumber++
-
-    }
-    return Parse-ReleaseHighlights -content $releaseHighlights
-}
-
-
-function Parse-ReleaseHighlights ($content)
-{
-    $HEADER_REGEX = "^#{3}(?<PackageName>[^0-9]*)(?<PackageVersion>.*)\[Changelog\]\((?<ChangelogUrl>.*)\)"
-    if ($content -isnot [Array]) 
-    {
-        $content = $content.Split("`n")
-    }
-
-    $releaseHighlights = @{}
-    $addContent = $false
-
-    foreach ($line in $content)
-    {
-        if ($line -match $HEADER_REGEX)
-        {
-            $packageName = ($matches["PackageName"]).Trim()
-            $packageVersion = ($matches["PackageVersion"]).Trim()
-            $changelogUrl = ($matches["ChangelogUrl"]).Trim()
-            $key = "${packageName}:${packageVersion}"
-            $releaseHighlights[$key] = @{}
-            $releaseHighlights[$key]["ChangelogUrl"] = $changelogUrl
-            $releaseHighlights[$key]["Content"] = @()
-            $addContent = $true
+            $checkLine = $True
             continue
         }
-        elseif ($addContent) {
-            $releaseHighlights[$key]["Content"] += $line
+        if ($line -eq "-->")
+        {
+            break
+        }
+        if ($checkLine)
+        {
+            $pkgInfo = ($line.Trim()).Split(":")
+            $packageName = $pkgInfo[0]
+            $packageMetaData = $CsvMetaData | Where-Object { $_.Package -eq $packageName }
+            if ($packageMetaData.Count -gt 0)
+            {
+                $presentPkgInfo += $line.Trim()
+            }
         }
     }
-    return $releaseHighlights
+    return $presentPkgInfo
 }
 
 function Filter-ReleaseHighlights ($releaseHighlights)
@@ -77,8 +44,7 @@ function Filter-ReleaseHighlights ($releaseHighlights)
         $packageName = $keyInfo[0]
         $packageVersion = $keyInfo[1]
 
-        $csvMetaData = Get-CSVMetadata
-        $packageMetaData = $csvMetaData | Where-Object { $_.Package -eq $packageName }
+        $packageMetaData = $CsvMetaData | Where-Object { $_.Package -eq $packageName }
 
         if ($packageMetaData.ServiceName -eq "template")
         {
@@ -100,52 +66,63 @@ function Filter-ReleaseHighlights ($releaseHighlights)
     return $results
 }
 
-function Write-GeneralReleaseNotesSections ($releaseHighlights, $csvMetaData, $sectionName)
-{
-    $sectionContent = @()
-    $sectionContent += ""
-    foreach ($key in $releaseHighlights.Keys)
-    {
-        $keyInfo = $key.Split(":")
-        $packageName = $keyInfo[0]
-        $packageVersion = $keyInfo[1]
-        $packageSemVer = [AzureEngSemanticVersion]::ParseVersionString($packageVersion)
-        
-        if ($null -eq $packageSemVer)
-        {
-            LogWarning "Invalid version [ $packageVersion ] detected"
-            continue
-        }
-
-        if ($packageSemVer.VersionType -eq $sectionName)
-        {
-            $packageFriendlyName = ($csvMetaData | Where-Object { $_.Package -eq $packageName }).DisplayName
-            $sectionContent += "- ${packageFriendlyName}"
-        }
-    }
-    $sectionContent += ""
-    return $sectionContent
-}
-
 function Write-GeneralReleaseNote ($releaseHighlights, $releaseFilePath)
 {
-    $csvMetaData = Get-CSVMetadata
     $releaseContent = Get-Content $releaseFilePath
     $newReleaseContent = @()
-    $lineNumber = 0
+    $writingPaused = $False
 
-    while ($lineNumber -lt $releaseContent.Count)
+    foreach ($line in $releaseContent)
     {
-        $line = $releaseContent[$lineNumber]
-        if($line -match $SECTION_REGEX)
+        if ($line -match $PATTERN_REGEX)
         {
-            if (($matches["SectionName"] -eq "ga") -and ($matches["Command"] -eq "start"))
+            $sectionName = $matches["SectionName"]
+            $pattern = $matches["Pattern"]
+
+            foreach ($key in $releaseHighlights.Keys)
             {
-                $newReleaseContent += $line
+                $pkgInfo = $key.Split(":")
+                $packageName = $pkgInfo[0]
+                $packageVersion = $pkgInfo[1]
+                $packageFriendlyName = ($csvMetaData | Where-Object { $_.Package -eq $PackageName }).DisplayName
 
+                if ($null -eq $packageFriendlyName)
+                {
+                    $packageFriendlyName = $packageName
+                }
 
+                $changelogUrl = $releaseHighlights[$key]["ChangelogUrl"]
+                $changelogUrl = "(${changelogUrl})"
+                $highlightsBody = $releaseHighlights[$key]["Content"]
+                $packageSemVer = [AzureEngSemanticVersion]::ParseVersionString($PackageVersion)
+                
+                $lineValue = $ExecutionContext.InvokeCommand.ExpandString($pattern)
+                if ([System.String]::IsNullOrEmpty($sectionName))
+                {
+                    $newReleaseContent += $lineValue
+                }
+                elseif ($packageSemVer.VersionType -eq $sectionName)
+                {
+                    $newReleaseContent += $lineValue
+                }
+            }
+            $newReleaseContent += ""
+            if ($writingPaused)
+            {
+                $newReleaseContent += "```````n"
+                $writingPaused = $False
             }
         }
 
+        if ($line -eq "``````")
+        {
+            $writingPaused = $True
+        }
+
+        if (!$writingPaused)
+        {
+            $newReleaseContent += $line
+        }
     }
+    Set-Content -Path $releaseFilePath -Value $newReleaseContent
 }
